@@ -1,48 +1,67 @@
-import os
-import google.generativeai as genai
-import google.generativeai.types as types
+!pip install flask flask-cors pyngrok transformers torch --quiet
+
 from flask import Flask, request, jsonify
+from flask_cors import CORS
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+import torch
+from pyngrok import ngrok
+import threading
 
-# Load API key securely
-API_KEY = "AIzaSyBrYh2jmIjEKJAhtaZdWxi0CGhv1Ed4E50"  # Replace with your actual API key
-genai.configure(api_key=API_KEY)  # ✅ Correct way to set API key
-
-# Initialize model
-model = genai.GenerativeModel("gemini-2.0-flash")
-
-# Initialize Flask app
 app = Flask(__name__)
+CORS(app)
 
-def generate_response(input_text):
-    """Generates a response to verify if a job is fake or genuine."""
-    
-    input_text += " Determine if the job information is fake or genuine in percentages with a one-line explanation. Give reasons in three bullet points and keep them small."
+# Path where you uploaded your model (modify if needed)
+model_path = "bc0985/Fake_Job_LLM"
 
-    response = model.generate_content(
-        input_text,
-        generation_config=types.GenerationConfig(
-            temperature=1,
-            top_p=0.95,
-            top_k=40,
-            max_output_tokens=100,
-            response_mime_type="text/plain",
-        ),
-    )
+# Load tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoModelForCausalLM.from_pretrained(
+    model_path,
+    device_map="auto",
+    torch_dtype=torch.float16
+)
 
-    return response.text.strip().replace('•', '*')  # Clean response
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"
 
-@app.route("/check-job", methods=["POST"])
-def check_job():
-    """API endpoint to check if a job is fake or genuine."""
+# Define the pipeline globally
+pipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=100,
+    temperature=0.7,
+    top_p=0.9,
+    do_sample=True,
+    repetition_penalty=1.2,
+)
+
+# Function to classify job listings
+def run_inference(job_listing):
+    instruction = "Classify whether the following job listing is real or fake. Provide your reasoning."
+    prompt = f"{instruction}\n\n{job_listing}\n\nAnswer:"
+
+    output = pipe(prompt)
+    generated_text = output[0]["generated_text"]
+
+    if "Answer:" in generated_text:
+        return generated_text.split("Answer:")[-1].strip()
+    else:
+        return generated_text.strip()
+
+@app.route('/predict', methods=['POST'])
+def predict():
     data = request.json
-    job_details = data.get("job_details", "")
+    job_listing = data.get("job_listing", "")
+    prediction = run_inference(job_listing)
+    return jsonify({"Prediction": prediction})
 
-    if not job_details:
-        return jsonify({"error": "Job details are required"}), 400
+# Set up ngrok with threading
+def run_ngrok():
+    public_url = ngrok.connect(5000)
+    print(f"Public URL: {public_url}")
 
-    result = generate_response(job_details)
-    return jsonify({"result": result})
+threading.Thread(target=run_ngrok, daemon=True).start()
 
-# Run the Flask app
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
